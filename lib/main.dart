@@ -1,3 +1,748 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() {
+  runApp(
+    const ProviderScope(
+      child: NetflixCloneApp(),
+    ),
+  );
+}
+
+class NetflixCloneApp extends StatelessWidget {
+  const NetflixCloneApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Netflix Clone',
+      theme: ThemeData.dark().copyWith(
+        primaryColor: Colors.red,
+        scaffoldBackgroundColor: Colors.black,
+        appBarTheme: const AppBarTheme(backgroundColor: Colors.black),
+      ),
+      home: const SplashScreen(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+
+class MovieNotifier extends StateNotifier<AsyncValue<List<dynamic>>> {
+  MovieNotifier() : super(const AsyncValue.loading());
+
+  int _currentPage = 1;
+  bool _hasMorePages = true;
+
+  Future<void> fetchMovies({bool refresh = false}) async {
+    if (refresh) {
+      _currentPage = 1;
+      _hasMorePages = true;
+      state = const AsyncValue.loading();
+    }
+
+    if (!_hasMorePages) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedData = prefs.getString('cached_movies_$_currentPage');
+
+      if (cachedData != null && !refresh) {
+        final List<dynamic> movies = json.decode(cachedData);
+        state = AsyncValue.data([...state.value ?? [], ...movies]);
+        _currentPage++;
+      } else {
+        final response = await http.get(
+          Uri.parse('https://api.tvmaze.com/shows?page=$_currentPage'),
+        );
+
+        if (response.statusCode == 200) {
+          final List<dynamic> newMovies = json.decode(response.body);
+          if (newMovies.isEmpty) {
+            _hasMorePages = false;
+          } else {
+            state = AsyncValue.data([...state.value ?? [], ...newMovies]);
+            await prefs.setString('cached_movies_$_currentPage', response.body);
+            _currentPage++;
+          }
+        } else {
+          throw Exception('Failed to load movies');
+        }
+      }
+    } catch (e) {
+      state = AsyncValue.error(e, StackTrace.current);
+    }
+  }
+}
+
+final movieProvider = StateNotifierProvider<MovieNotifier, AsyncValue<List<dynamic>>>(
+  (ref) => MovieNotifier(),
+);
+
+
+final trendingMoviesProvider = Provider<List<dynamic>>((ref) {
+  final movies = ref.watch(movieProvider).value ?? [];
+  return movies.take(10).toList();
+});
+
+final topRatedMoviesProvider = Provider<List<dynamic>>((ref) {
+  final movies = ref.watch(movieProvider).value ?? [];
+  return movies.reversed.take(10).toList();
+});
+
+
+final previewsProvider = FutureProvider<List<dynamic>>((ref) async {
+  final response = await http.get(Uri.parse('https://api.tvmaze.com/shows'));
+  if (response.statusCode == 200) {
+    return (json.decode(response.body) as List).take(10).toList();
+  } else {
+    throw Exception('Failed to load previews');
+  }
+});
+
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({Key? key}) : super(key: key);
+
+  @override
+  _SplashScreenState createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    );
+    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
+
+    _controller.forward();
+
+    Future.delayed(const Duration(seconds: 3), () {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const HomeScreen()),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Center(
+        child: FadeTransition(
+          opacity: _animation,
+          child: Image.asset('android/icons8-netflix-48.png', width: 200),
+        ),
+      ),
+    );
+  }
+}
+
+class HomeScreen extends ConsumerStatefulWidget {
+  const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(movieProvider.notifier).fetchMovies();
+    });
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent) {
+      ref.read(movieProvider.notifier).fetchMovies();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final moviesState = ref.watch(movieProvider);
+
+    return Scaffold(
+      body: moviesState.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stack) => Center(child: Text('Error: $error')),
+        data: (movies) => CustomScrollView(
+          controller: _scrollController,
+          slivers: [
+            SliverAppBar(
+              floating: true,
+              backgroundColor: Colors.transparent,
+              title: Image.asset('android/icons8-netflix-48.png', width: 100),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.cast),
+                  onPressed: () {},
+                ),
+                IconButton(
+                  icon: const Icon(Icons.search),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => const SearchScreen()),
+                    );
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.person),
+                  onPressed: () {},
+                ),
+              ],
+            ),
+            SliverList(
+              delegate: SliverChildListDelegate([
+                const FeaturedContent(),
+                const PreviewList(),
+                MovieList(title: 'Trending Now', movieSelector: (ref) => ref.watch(trendingMoviesProvider)),
+                MovieList(title: 'Top Rated', movieSelector: (ref) => ref.watch(topRatedMoviesProvider)),
+                MovieList(title: 'Popular on Netflix', movieSelector: (ref) => movies),
+              ]),
+            ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        backgroundColor: Colors.black,
+        selectedItemColor: Colors.white,
+        unselectedItemColor: Colors.grey,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
+          BottomNavigationBarItem(icon: Icon(Icons.video_library), label: 'Coming Soon'),
+          BottomNavigationBarItem(icon: Icon(Icons.arrow_downward), label: 'Downloads'),
+        ],
+      ),
+    );
+  }
+}
+
+class FeaturedContent extends ConsumerWidget {
+  const FeaturedContent({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final moviesState = ref.watch(movieProvider);
+
+    return moviesState.when(
+      loading: () => const SizedBox(height: 500, child: Center(child: CircularProgressIndicator())),
+      error: (error, stack) => SizedBox(height: 500, child: Center(child: Text('Error: $error'))),
+      data: (movies) {
+        if (movies.isEmpty) {
+          return const SizedBox(height: 500, child: Center(child: Text('No movies available')));
+        }
+        final featuredMovie = movies.first;
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            Image.network(
+              featuredMovie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
+              height: 500,
+              width: double.infinity,
+              fit: BoxFit.cover,
+            ),
+            Positioned(
+              bottom: 40,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: () {},
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Play'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                  ),
+                  const SizedBox(width: 20),
+                  ElevatedButton.icon(
+                    onPressed: () {},
+                    icon: const Icon(Icons.info_outline),
+                    label: const Text('More Info'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.withOpacity(0.7)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class MovieList extends ConsumerWidget {
+  final String title;
+  final List<dynamic> Function(WidgetRef) movieSelector;
+
+  const MovieList({Key? key, required this.title, required this.movieSelector}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final movies = movieSelector(ref);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: Text(
+            title,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+        ),
+        SizedBox(
+          height: 200,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: movies.length,
+            itemBuilder: (context, index) {
+              final movie = movies[index];
+              return GestureDetector(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => DetailsScreen(movie: movie),
+                    ),
+                  );
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(4.0),
+                  child: Image.network(
+                    movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+                    width: 130,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        width: 130,
+                        color: Colors.grey,
+                        child: Center(child: Text(movie['name'])),
+                      );
+                    },
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class SearchScreen extends ConsumerStatefulWidget {
+  const SearchScreen({Key? key}) : super(key: key);
+
+  @override
+  _SearchScreenState createState() => _SearchScreenState();
+}
+
+class _SearchScreenState extends ConsumerState<SearchScreen> {
+  List<dynamic> searchResults = [];
+  bool isLoading = false;
+  String errorMessage = '';
+
+  Future<void> searchMovies(String query) async {
+    if (query.isEmpty) {
+      setState(() {
+        searchResults = [];
+        isLoading = false;
+        errorMessage = '';
+      });
+      return;
+    }
+
+    setState(() {
+      isLoading = true;
+      errorMessage = '';
+    });
+
+    try {
+      final response = await http.get(Uri.parse('https://api.tvmaze.com/search/shows?q=$query'));
+      if (response.statusCode == 200) {
+        setState(() {
+          searchResults = json.decode(response.body);
+          isLoading = false;
+        });
+      } else {
+        throw Exception('Failed to search movies');
+      }
+    } catch (e) {
+      setState(() {
+        isLoading = false;
+        errorMessage = 'An error occurred. Please try again.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: TextField(
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Search for a movie or TV show',
+            hintStyle: TextStyle(color: Colors.grey),
+            border: InputBorder.none,
+            prefixIcon: Icon(Icons.search, color: Colors.grey),
+          ),
+          onChanged: (query) => searchMovies(query),
+        ),
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : errorMessage.isNotEmpty
+              ? Center(child: Text(errorMessage))
+              : GridView.builder(
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    childAspectRatio: 2 / 3,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                  ),
+                  itemCount: searchResults.length,
+                  itemBuilder: (context, index) {
+                    final movie = searchResults[index]['show'];
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => DetailsScreen(movie: movie),
+                          ),
+                        );
+                      },
+                      child: Image.network(
+                        movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.grey,
+                            child: Center(child: Text(movie['name'])),
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+class DetailsScreen extends ConsumerWidget {
+  final dynamic movie;
+
+  const DetailsScreen({Key? key, required this.movie}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      body: CustomScrollView(
+        slivers: [
+          SliverAppBar(
+            expandedHeight: 300.0,
+            floating: false,
+            pinned: true,
+            flexibleSpace: FlexibleSpaceBar(
+              title: Text(movie['name']),
+              background: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.network(
+                    movie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        color: Colors.grey,
+                        child: Center(child: Text(movie['name'])),
+                      );
+                    },
+                  ),
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Colors.transparent, Colors.black],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SliverList(
+            delegate: SliverChildListDelegate([
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        // Implement play functionality
+                      },
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Play'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        minimumSize: const Size(double.infinity, 50),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      movie['name'],
+                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Text('${movie['rating']?['average'] ?? 'N/A'} Rating'),
+                        const SizedBox(width: 16),
+                        Text(movie['premiered']?.split('-')[0] ?? 'N/A'),
+                        const SizedBox(width: 16),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.white),
+                            borderRadius: BorderRadius.circular(3),
+                          ),
+                          child: Text(movie['type'] ?? 'N/A'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      _parseHtmlString(movie['summary'] ?? 'No summary available.'),
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 16),
+                    Text('Starring: ${movie['_embedded']?['cast']?.map((c) => c['person']['name']).take(3).join(', ') ?? 'N/A'}'),
+                    const SizedBox(height: 8),
+                    Text('Genres: ${(movie['genres'] as List?)?.join(', ') ?? 'N/A'}'),
+                    const SizedBox(height: 24),
+                    const Text(
+                      'More Like This',
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      height: 200,
+                      child: Consumer(
+                        builder: (context, ref, child) {
+                          final movies = ref.watch(movieProvider).value ?? [];
+                          final List<dynamic> movieGenres = movie['genres'] ?? [];
+                          final similarMovies = movies
+                              .where((m) {
+                                final List<dynamic> genres = m['genres'] ?? [];
+                                return genres.any((g) => movieGenres.contains(g));
+                              })
+                              .take(10)
+                              .toList();
+                          return ListView.builder(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: similarMovies.length,
+                            itemBuilder: (context, index) {
+                              final similarMovie = similarMovies[index];
+                              return GestureDetector(
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (context) => DetailsScreen(movie: similarMovie),
+                                    ),
+                                  );
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.only(right: 8.0),
+                                  child: Image.network(
+                                    similarMovie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+                                    width: 130,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return Container(
+                                        width: 130,
+                                        color: Colors.grey,
+                                        child: Center(child: Text(similarMovie['name'])),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _parseHtmlString(String htmlString) {
+    return htmlString.replaceAll(RegExp(r'<[^>]*>'), '');
+  }
+}
+
+class PreviewCard extends StatelessWidget {
+  final dynamic movie;
+
+  const PreviewCard({Key? key, required this.movie}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => DetailsScreen(movie: movie),
+          ),
+        );
+      },
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CircleAvatar(
+            radius: 50,
+            backgroundImage: NetworkImage(
+              movie['image']?['medium'] ?? 'https://via.placeholder.com/100x100',
+            ),
+            onBackgroundImageError: (exception, stackTrace) {
+              print('Error loading image: $exception');
+            },
+          ),
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.red, width: 2),
+            ),
+            child: const CircleAvatar(
+              radius: 52,
+              backgroundColor: Colors.transparent,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PreviewList extends ConsumerWidget {
+  const PreviewList({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final previewsAsyncValue = ref.watch(previewsProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.all(8.0),
+          child: Text(
+            'Previews',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+        ),
+        SizedBox(
+          height: 110,
+          child: previewsAsyncValue.when(
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (error, stack) => Center(child: Text('Error: $error')),
+            data: (previews) => ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: previews.length,
+              itemBuilder: (context, index) {
+                final movie = previews[index];
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                  child: PreviewCard(movie: movie),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // import 'package:flutter/material.dart';
 // import 'package:http/http.dart' as http;
 // import 'dart:convert';
@@ -2058,725 +2803,743 @@
 
 
 
-import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
+// import 'package:flutter/material.dart';
+// import 'package:http/http.dart' as http;
+// import 'dart:convert';
+// import 'package:provider/provider.dart';
+// import 'package:shared_preferences/shared_preferences.dart';
+// import 'dart:async';
 
-void main() {
-  runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => MovieProvider()),
-      ],
-      child: const NetflixCloneApp(),
-    ),
-  );
-}
+// void main() {
+//   runApp(
+//     MultiProvider(
+//       providers: [
+//         ChangeNotifierProvider(create: (_) => MovieProvider()),
+//       ],
+//       child: const NetflixCloneApp(),
+//     ),
+//   );
+// }
 
-class NetflixCloneApp extends StatelessWidget {
-  const NetflixCloneApp({super.key});
+// class NetflixCloneApp extends StatelessWidget {
+//   const NetflixCloneApp({super.key});
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Netflix Clone',
-      theme: ThemeData.dark().copyWith(
-        primaryColor: Colors.red,
-        scaffoldBackgroundColor: Colors.black,
-        appBarTheme: const AppBarTheme(backgroundColor: Colors.black),
-      ),
-      home: const SplashScreen(),
-      debugShowCheckedModeBanner: false,
-    );
-  }
-}
-
-
-class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
-
-  @override
-  _SplashScreenState createState() => _SplashScreenState();
-}
-
-class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _animation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      duration: const Duration(seconds: 2),
-      vsync: this,
-    );
-    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
-
-    _controller.forward();
-
-    Future.delayed(const Duration(seconds: 3), () {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
-      );
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Center(
-        child: FadeTransition(
-          opacity: _animation,
-          child: Image.asset('android/icons8-netflix-48.png', width: 200),
-        ),
-      ),
-    );
-  }
-}
-
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  _HomeScreenState createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  final ScrollController _scrollController = ScrollController();
-
-  @override
-  void initState() {
-    super.initState();
-    _scrollController.addListener(_onScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final movieProvider = Provider.of<MovieProvider>(context, listen: false);
-      movieProvider.fetchMovies();
-      movieProvider.fetchPreviews();
-    });
-  }
-
-  void _onScroll() {
-    if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent) {
-      Provider.of<MovieProvider>(context, listen: false).fetchMovies();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: CustomScrollView(
-        controller: _scrollController,
-        slivers: [
-          SliverAppBar(
-            floating: true,
-            backgroundColor: Colors.transparent,
-            title: Image.asset('android/icons8-netflix-48.png', width: 100),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.cast),
-                onPressed: () {},
-              ),
-              IconButton(
-                icon: const Icon(Icons.search),
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => const SearchScreen()),
-                  );
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.person),
-                onPressed: () {},
-              ),
-            ],
-          ),
-          SliverList(
-            delegate: SliverChildListDelegate([
-              const FeaturedContent(),
-              const PreviewList(),
-              MovieList(title: 'Trending Now', movieSelector: (provider) => provider.trendingMovies),
-              MovieList(title: 'Top Rated', movieSelector: (provider) => provider.topRatedMovies),
-              MovieList(title: 'Popular on Netflix', movieSelector: (provider) => provider.movies),
-            ]),
-          ),
-        ],
-      ),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        backgroundColor: Colors.black,
-        selectedItemColor: Colors.white,
-        unselectedItemColor: Colors.grey,
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.video_library), label: 'Coming Soon'),
-          BottomNavigationBarItem(icon: Icon(Icons.arrow_downward), label: 'Downloads'),
-        ],
-      ),
-    );
-  }
-}
+//   @override
+//   Widget build(BuildContext context) {
+//     return MaterialApp(
+//       title: 'Netflix Clone',
+//       theme: ThemeData.dark().copyWith(
+//         primaryColor: Colors.red,
+//         scaffoldBackgroundColor: Colors.black,
+//         appBarTheme: const AppBarTheme(backgroundColor: Colors.black),
+//       ),
+//       home: const SplashScreen(),
+//       debugShowCheckedModeBanner: false,
+//     );
+//   }
+// }
 
 
+// class SplashScreen extends StatefulWidget {
+//   const SplashScreen({super.key});
 
-class MovieProvider extends ChangeNotifier {
-  final List<dynamic> _movies = [];
-  final List<dynamic> _trendingMovies = [];
-  final List<dynamic> _topRatedMovies = [];
-  List<dynamic> _previews = [];
-  bool _isLoading = false;
-  String _errorMessage = '';
-  int _currentPage = 1;
-  bool _hasMorePages = true;
+//   @override
+//   _SplashScreenState createState() => _SplashScreenState();
+// }
 
-  List<dynamic> get movies => _movies;
-  List<dynamic> get trendingMovies => _trendingMovies;
-  List<dynamic> get topRatedMovies => _topRatedMovies;
-  List<dynamic> get previews => _previews;
-  bool get isLoading => _isLoading;
-  String get errorMessage => _errorMessage;
+// class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+//   late AnimationController _controller;
+//   late Animation<double> _animation;
 
-  Future<void> fetchMovies({bool refresh = false}) async {
-    if (refresh) {
-      _currentPage = 1;
-      _hasMorePages = true;
-      _movies.clear();
-      _trendingMovies.clear();
-      _topRatedMovies.clear();
-    }
+//   @override
+//   void initState() {
+//     super.initState();
+//     _controller = AnimationController(
+//       duration: const Duration(seconds: 2),
+//       vsync: this,
+//     );
+//     _animation = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
 
-    if (!_hasMorePages) return;
+//     _controller.forward();
 
-    _isLoading = true;
-    _errorMessage = '';
-    notifyListeners();
+//     Future.delayed(const Duration(seconds: 3), () {
+//       Navigator.pushReplacement(
+//         context,
+//         MaterialPageRoute(builder: (context) => const HomeScreen()),
+//       );
+//     });
+//   }
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final cachedData = prefs.getString('cached_movies_$_currentPage');
+//   @override
+//   void dispose() {
+//     _controller.dispose();
+//     super.dispose();
+//   }
 
-      if (cachedData != null && !refresh) {
-        _movies.addAll(json.decode(cachedData));
-        _currentPage++;
-      } else {
-        final response = await http.get(
-          Uri.parse('https://api.tvmaze.com/shows?page=$_currentPage'),
-        );
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       backgroundColor: Colors.black,
+//       body: Center(
+//         child: FadeTransition(
+//           opacity: _animation,
+//           child: Image.asset('android/icons8-netflix-48.png', width: 200),
+//         ),
+//       ),
+//     );
+//   }
+// }
 
-        if (response.statusCode == 200) {
-          final newMovies = json.decode(response.body);
-          if (newMovies.isEmpty) {
-            _hasMorePages = false;
-          } else {
-            _movies.addAll(newMovies);
-            await prefs.setString('cached_movies_$_currentPage', response.body);
-            _currentPage++;
-          }
-          _trendingMovies.addAll(newMovies.take(10));
-          _topRatedMovies.addAll(newMovies.reversed.take(10));
-        } else {
-          throw Exception('Failed to load movies');
-        }
-      }
+// class HomeScreen extends StatefulWidget {
+//   const HomeScreen({super.key});
 
-      _isLoading = false;
-      notifyListeners();
-    } catch (e) {
-      _isLoading = false;
-      _errorMessage = 'An error occurred. Please try again later.';
-      notifyListeners();
-    }
-  }
+//   @override
+//   _HomeScreenState createState() => _HomeScreenState();
+// }
 
-  Future<void> fetchPreviews() async {
-    try {
-      final response = await http.get(Uri.parse('https://api.tvmaze.com/shows'));
-      if (response.statusCode == 200) {
-        _previews = (json.decode(response.body) as List).take(10).toList();
-        notifyListeners();
-      } else {
-        throw Exception('Failed to load previews');
-      }
-    } catch (e) {
-      print('Error fetching previews: $e');
-    }
-  }
-}
+// class _HomeScreenState extends State<HomeScreen> {
+//   final ScrollController _scrollController = ScrollController();
 
-class FeaturedContent extends StatelessWidget {
-  const FeaturedContent({super.key});
+//   @override
+//   void initState() {
+//     super.initState();
+//     _scrollController.addListener(_onScroll);
+//     WidgetsBinding.instance.addPostFrameCallback((_) {
+//       final movieProvider = Provider.of<MovieProvider>(context, listen: false);
+//       movieProvider.fetchMovies();
+//       movieProvider.fetchPreviews();
+//     });
+//   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<MovieProvider>(
-      builder: (context, movieProvider, child) {
-        if (movieProvider.movies.isEmpty) {
-          return const SizedBox(height: 500, child: Center(child: CircularProgressIndicator()));
-        }
-        final featuredMovie = movieProvider.movies.first;
-        return Stack(
-          alignment: Alignment.center,
-          children: [
-            Image.network(
-              featuredMovie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
-              height: 500,
-              width: double.infinity,
-              fit: BoxFit.cover,
-            ),
-            Positioned(
-              bottom: 40,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: () {},
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Play'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-                  ),
-                  const SizedBox(width: 20),
-                  ElevatedButton.icon(
-                    onPressed: () {},
-                    icon: const Icon(Icons.info_outline),
-                    label: const Text('More Info'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.withOpacity(0.7)),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
+//   void _onScroll() {
+//     if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent) {
+//       Provider.of<MovieProvider>(context, listen: false).fetchMovies();
+//     }
+//   }
 
-class MovieList extends StatelessWidget {
-  final String title;
-  final List<dynamic> Function(MovieProvider) movieSelector;
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       body: CustomScrollView(
+//         controller: _scrollController,
+//         slivers: [
+//           SliverAppBar(
+//             floating: true,
+//             backgroundColor: Colors.transparent,
+//             title: Image.asset('android/icons8-netflix-48.png', width: 100),
+//             actions: [
+//               IconButton(
+//                 icon: const Icon(Icons.cast),
+//                 onPressed: () {},
+//               ),
+//               IconButton(
+//                 icon: const Icon(Icons.search),
+//                 onPressed: () {
+//                   Navigator.push(
+//                     context,
+//                     MaterialPageRoute(builder: (context) => const SearchScreen()),
+//                   );
+//                 },
+//               ),
+//               IconButton(
+//                 icon: const Icon(Icons.person),
+//                 onPressed: () {},
+//               ),
+//             ],
+//           ),
+//           SliverList(
+//             delegate: SliverChildListDelegate([
+//               const FeaturedContent(),
+//               const PreviewList(),
+//               MovieList(title: 'Trending Now', movieSelector: (provider) => provider.trendingMovies),
+//               MovieList(title: 'Top Rated', movieSelector: (provider) => provider.topRatedMovies),
+//               MovieList(title: 'Popular on Netflix', movieSelector: (provider) => provider.movies),
+//             ]),
+//           ),
+//         ],
+//       ),
+//       bottomNavigationBar: BottomNavigationBar(
+//         type: BottomNavigationBarType.fixed,
+//         backgroundColor: Colors.black,
+//         selectedItemColor: Colors.white,
+//         unselectedItemColor: Colors.grey,
+//         items: const [
+//           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
+//           BottomNavigationBarItem(icon: Icon(Icons.video_library), label: 'Coming Soon'),
+//           BottomNavigationBarItem(icon: Icon(Icons.arrow_downward), label: 'Downloads'),
+//         ],
+//       ),
+//     );
+//   }
+// }
 
-  const MovieList({super.key, required this.title, required this.movieSelector});
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: Text(
-            title,
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-        ),
-        SizedBox(
-          height: 200,
-          child: Consumer<MovieProvider>(
-            builder: (context, movieProvider, child) {
-              final movies = movieSelector(movieProvider);
-              return ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: movies.length,
-                itemBuilder: (context, index) {
-                  final movie = movies[index];
-                  return GestureDetector(
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => DetailsScreen(movie: movie),
-                        ),
-                      );
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.all(4.0),
-                      child: Image.network(
-                        movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
-                        width: 130,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            width: 130,
-                            color: Colors.grey,
-                            child: Center(child: Text(movie['name'])),
-                          );
-                        },
-                      ),
-                    ),
-                  );
-                },
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
 
-class SearchScreen extends StatefulWidget {
-  const SearchScreen({super.key});
+// class MovieProvider extends ChangeNotifier {
+//   final List<dynamic> _movies = [];
+//   final List<dynamic> _trendingMovies = [];
+//   final List<dynamic> _topRatedMovies = [];
+//   List<dynamic> _previews = [];
+//   bool _isLoading = false;
+//   String _errorMessage = '';
+//   int _currentPage = 1;
+//   bool _hasMorePages = true;
 
-  @override
-  _SearchScreenState createState() => _SearchScreenState();
-}
+//   List<dynamic> get movies => _movies;
+//   List<dynamic> get trendingMovies => _trendingMovies;
+//   List<dynamic> get topRatedMovies => _topRatedMovies;
+//   List<dynamic> get previews => _previews;
+//   bool get isLoading => _isLoading;
+//   String get errorMessage => _errorMessage;
 
-class _SearchScreenState extends State<SearchScreen> {
-  List<dynamic> searchResults = [];
-  bool isLoading = false;
-  String errorMessage = '';
-  Timer? _debounce;
+//   Future<void> fetchMovies({bool refresh = false}) async {
+//     if (refresh) {
+//       _currentPage = 1;
+//       _hasMorePages = true;
+//       _movies.clear();
+//       _trendingMovies.clear();
+//       _topRatedMovies.clear();
+//     }
 
-  Future<void> searchMovies(String query) async {
-    if (query.isEmpty) {
-      setState(() {
-        searchResults = [];
-        isLoading = false;
-        errorMessage = '';
-      });
-      return;
-    }
+//     if (!_hasMorePages) return;
 
-    setState(() {
-      isLoading = true;
-      errorMessage = '';
-    });
+//     _isLoading = true;
+//     _errorMessage = '';
+//     notifyListeners();
 
-    try {
-      final response = await http.get(Uri.parse('https://api.tvmaze.com/search/shows?q=$query'));
-      if (response.statusCode == 200) {
-        setState(() {
-          searchResults = json.decode(response.body);
-          isLoading = false;
-        });
-      } else {
-        throw Exception('Failed to search movies');
-      }
-    } catch (e) {
-      setState(() {
-        isLoading = false;
-        errorMessage = 'An error occurred. Please try again.';
-      });
-    }
-  }
+//     try {
+//       final prefs = await SharedPreferences.getInstance();
+//       final cachedData = prefs.getString('cached_movies_$_currentPage');
 
-  void _onSearchChanged(String query) {
-    if (_debounce?.isActive ?? false) _debounce!.cancel();
-    _debounce = Timer(const Duration(milliseconds: 500), () {
-      searchMovies(query);
-    });
-  }
+//       if (cachedData != null && !refresh) {
+//         _movies.addAll(json.decode(cachedData));
+//         _currentPage++;
+//       } else {
+//         final response = await http.get(
+//           Uri.parse('https://api.tvmaze.com/shows?page=$_currentPage'),
+//         );
 
-  @override
-  void dispose() {
-    _debounce?.cancel();
-    super.dispose();
-  }
+//         if (response.statusCode == 200) {
+//           final newMovies = json.decode(response.body);
+//           if (newMovies.isEmpty) {
+//             _hasMorePages = false;
+//           } else {
+//             _movies.addAll(newMovies);
+//             await prefs.setString('cached_movies_$_currentPage', response.body);
+//             _currentPage++;
+//           }
+//           _trendingMovies.addAll(newMovies.take(10));
+//           _topRatedMovies.addAll(newMovies.reversed.take(10));
+//         } else {
+//           throw Exception('Failed to load movies');
+//         }
+//       }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: TextField(
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            hintText: 'Search for a movie or TV show',
-            hintStyle: TextStyle(color: Colors.grey),
-            border: InputBorder.none,
-            prefixIcon: Icon(Icons.search, color: Colors.grey),
-          ),
-          onChanged: _onSearchChanged,
-        ),
-      ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : errorMessage.isNotEmpty
-              ? Center(child: Text(errorMessage))
-              : GridView.builder(
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    childAspectRatio: 2 / 3,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                  ),
-                  itemCount: searchResults.length,
-                  itemBuilder: (context, index) {
-                    final movie = searchResults[index]['show'];
-                    return GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => DetailsScreen(movie: movie),
-                          ),
-                        );
-                      },
-                      child: Image.network(
-                        movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            color: Colors.grey,
-                            child: Center(child: Text(movie['name'])),
-                          );
-                        },
-                      ),
-                    );
-                  },
-                ),
-    );
-  }
-}
+//       _isLoading = false;
+//       notifyListeners();
+//     } catch (e) {
+//       _isLoading = false;
+//       _errorMessage = 'An error occurred. Please try again later.';
+//       notifyListeners();
+//     }
+//   }
 
-class DetailsScreen extends StatelessWidget {
-  final dynamic movie;
+//   Future<void> fetchPreviews() async {
+//     try {
+//       final response = await http.get(Uri.parse('https://api.tvmaze.com/shows'));
+//       if (response.statusCode == 200) {
+//         _previews = (json.decode(response.body) as List).take(10).toList();
+//         notifyListeners();
+//       } else {
+//         throw Exception('Failed to load previews');
+//       }
+//     } catch (e) {
+//       print('Error fetching previews: $e');
+//     }
+//   }
+// }
 
-  const DetailsScreen({super.key, required this.movie});
+// class FeaturedContent extends StatelessWidget {
+//   const FeaturedContent({super.key});
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar(
-            expandedHeight: 300.0,
-            floating: false,
-            pinned: true,
-            flexibleSpace: FlexibleSpaceBar(
-              title: Text(movie['name']),
-              background: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Image.network(
-                    movie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) {
-                      return Container(
-                        color: Colors.grey,
-                        child: Center(child: Text(movie['name'])),
-                      );
-                    },
-                  ),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [Colors.transparent, Colors.black],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          SliverList(
-            delegate: SliverChildListDelegate([
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        // Implement play functionality
-                      },
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('Play'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
-                        minimumSize: const Size(double.infinity, 50),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      movie['name'],
-                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Text('${movie['rating']?['average'] ?? 'N/A'} Rating'),
-                        const SizedBox(width: 16),
-                        Text(movie['premiered']?.split('-')[0] ?? 'N/A'),
-                        const SizedBox(width: 16),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white),
-                            borderRadius: BorderRadius.circular(3),
-                          ),
-                          child: Text(movie['type'] ?? 'N/A'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      _parseHtmlString(movie['summary'] ?? 'No summary available.'),
-                      style: const TextStyle(fontSize: 16),
-                    ),
-                    const SizedBox(height: 16),
-                    Text('Starring: ${movie['_embedded']?['cast']?.map((c) => c['person']['name']).take(3).join(', ') ?? 'N/A'}'),
-                    const SizedBox(height: 8),
-                    Text('Genres: ${(movie['genres'] as List?)?.join(', ') ?? 'N/A'}'),
-                    const SizedBox(height: 24),
-                    const Text(
-                      'More Like This',
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      height: 200,
-                      child: Consumer<MovieProvider>(
-                        builder: (context, movieProvider, child) {
-                          final List<dynamic> movieGenres = movie['genres'] ?? [];
-                          final similarMovies = movieProvider.movies
-                              .where((m) {
-                                final List<dynamic> genres = m['genres'] ?? [];
-                                return genres.any((g) => movieGenres.contains(g));
-                              })
-                              .take(10)
-                              .toList();
-                          return ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: similarMovies.length,
-                            itemBuilder: (context, index) {
-                              final similarMovie = similarMovies[index];
-                              return GestureDetector(
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (context) => DetailsScreen(movie: similarMovie),
-                                    ),
-                                  );
-                                },
-                                child: Padding(
-                                  padding: const EdgeInsets.only(right: 8.0),
-                                  child: Image.network(
-                                    similarMovie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
-                                    width: 130,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (context, error, stackTrace) {
-                                      return Container(
-                                      width: 130,
-                                        color: Colors.grey,
-                                        child: Center(child: Text(similarMovie['name'])),
-                                      );
-                                    },
-                                  ),
-                                ),
-                              );
-                            },
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ]),
-          ),
-        ],
-      ),
-    );
-  }
+//   @override
+//   Widget build(BuildContext context) {
+//     return Consumer<MovieProvider>(
+//       builder: (context, movieProvider, child) {
+//         if (movieProvider.movies.isEmpty) {
+//           return const SizedBox(height: 500, child: Center(child: CircularProgressIndicator()));
+//         }
+//         final featuredMovie = movieProvider.movies.first;
+//         return Stack(
+//           alignment: Alignment.center,
+//           children: [
+//             Image.network(
+//               featuredMovie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
+//               height: 500,
+//               width: double.infinity,
+//               fit: BoxFit.cover,
+//             ),
+//             Positioned(
+//               bottom: 40,
+//               child: Row(
+//                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+//                 children: [
+//                   ElevatedButton.icon(
+//                     onPressed: () {},
+//                     icon: const Icon(Icons.play_arrow),
+//                     label: const Text('Play'),
+//                     style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+//                   ),
+//                   const SizedBox(width: 20),
+//                   ElevatedButton.icon(
+//                     onPressed: () {},
+//                     icon: const Icon(Icons.info_outline),
+//                     label: const Text('More Info'),
+//                     style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.withOpacity(0.7)),
+//                   ),
+//                 ],
+//               ),
+//             ),
+//           ],
+//         );
+//       },
+//     );
+//   }
+// }
 
-  String _parseHtmlString(String htmlString) {
-    return htmlString.replaceAll(RegExp(r'<[^>]*>'), '');
-  }
-}
+// class MovieList extends StatelessWidget {
+//   final String title;
+//   final List<dynamic> Function(MovieProvider) movieSelector;
 
-class PreviewCard extends StatelessWidget {
-  final dynamic movie;
+//   const MovieList({super.key, required this.title, required this.movieSelector});
 
-  const PreviewCard({super.key, required this.movie});
+//   @override
+//   Widget build(BuildContext context) {
+//     return Column(
+//       crossAxisAlignment: CrossAxisAlignment.start,
+//       children: [
+//         Padding(
+//           padding: const EdgeInsets.all(8.0),
+//           child: Text(
+//             title,
+//             style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+//           ),
+//         ),
+//         SizedBox(
+//           height: 200,
+//           child: Consumer<MovieProvider>(
+//             builder: (context, movieProvider, child) {
+//               final movies = movieSelector(movieProvider);
+//               return ListView.builder(
+//                 scrollDirection: Axis.horizontal,
+//                 itemCount: movies.length,
+//                 itemBuilder: (context, index) {
+//                   final movie = movies[index];
+//                   return GestureDetector(
+//                     onTap: () {
+//                       Navigator.push(
+//                         context,
+//                         MaterialPageRoute(
+//                           builder: (context) => DetailsScreen(movie: movie),
+//                         ),
+//                       );
+//                     },
+//                     child: Padding(
+//                       padding: const EdgeInsets.all(4.0),
+//                       child: Image.network(
+//                         movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+//                         width: 130,
+//                         fit: BoxFit.cover,
+//                         errorBuilder: (context, error, stackTrace) {
+//                           return Container(
+//                             width: 130,
+//                             color: Colors.grey,
+//                             child: Center(child: Text(movie['name'])),
+//                           );
+//                         },
+//                       ),
+//                     ),
+//                   );
+//                 },
+//               );
+//             },
+//           ),
+//         ),
+//       ],
+//     );
+//   }
+// }
 
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => DetailsScreen(movie: movie),
-          ),
-        );
-      },
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          CircleAvatar(
-            radius: 50,
-            backgroundImage: NetworkImage(
-              movie['image']?['medium'] ?? 'https://via.placeholder.com/100x100',
-            ),
-            onBackgroundImageError: (exception, stackTrace) {
-              print('Error loading image: $exception');
-            },
-          ),
-          Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.red, width: 2),
-            ),
-            child: const CircleAvatar(
-              radius: 52,
-              backgroundColor: Colors.transparent,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+// class SearchScreen extends StatefulWidget {
+//   const SearchScreen({super.key});
 
-class PreviewList extends StatelessWidget {
-  const PreviewList({super.key});
+//   @override
+//   _SearchScreenState createState() => _SearchScreenState();
+// }
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.all(8.0),
-          child: Text(
-            'Previews',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-        ),
-        SizedBox(
-          height: 110,
-          child: Consumer<MovieProvider>(
-            builder: (context, movieProvider, child) {
-              return ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: movieProvider.previews.length,
-                itemBuilder: (context, index) {
-                  final movie = movieProvider.previews[index];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                    child: PreviewCard(movie: movie),
-                  );
-                },
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
+// class _SearchScreenState extends State<SearchScreen> {
+//   List<dynamic> searchResults = [];
+//   bool isLoading = false;
+//   String errorMessage = '';
+//   Timer? _debounce;
+
+//   Future<void> searchMovies(String query) async {
+//     if (query.isEmpty) {
+//       setState(() {
+//         searchResults = [];
+//         isLoading = false;
+//         errorMessage = '';
+//       });
+//       return;
+//     }
+
+//     setState(() {
+//       isLoading = true;
+//       errorMessage = '';
+//     });
+
+//     try {
+//       final response = await http.get(Uri.parse('https://api.tvmaze.com/search/shows?q=$query'));
+//       if (response.statusCode == 200) {
+//         setState(() {
+//           searchResults = json.decode(response.body);
+//           isLoading = false;
+//         });
+//       } else {
+//         throw Exception('Failed to search movies');
+//       }
+//     } catch (e) {
+//       setState(() {
+//         isLoading = false;
+//         errorMessage = 'An error occurred. Please try again.';
+//       });
+//     }
+//   }
+
+//   void _onSearchChanged(String query) {
+//     if (_debounce?.isActive ?? false) _debounce!.cancel();
+//     _debounce = Timer(const Duration(milliseconds: 500), () {
+//       searchMovies(query);
+//     });
+//   }
+
+//   @override
+//   void dispose() {
+//     _debounce?.cancel();
+//     super.dispose();
+//   }
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       appBar: AppBar(
+//         title: TextField(
+//           style: const TextStyle(color: Colors.white),
+//           decoration: const InputDecoration(
+//             hintText: 'Search for a movie or TV show',
+//             hintStyle: TextStyle(color: Colors.grey),
+//             border: InputBorder.none,
+//             prefixIcon: Icon(Icons.search, color: Colors.grey),
+//           ),
+//           onChanged: _onSearchChanged,
+//         ),
+//       ),
+//       body: isLoading
+//           ? const Center(child: CircularProgressIndicator())
+//           : errorMessage.isNotEmpty
+//               ? Center(child: Text(errorMessage))
+//               : GridView.builder(
+//                   gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+//                     crossAxisCount: 3,
+//                     childAspectRatio: 2 / 3,
+//                     crossAxisSpacing: 8,
+//                     mainAxisSpacing: 8,
+//                   ),
+//                   itemCount: searchResults.length,
+//                   itemBuilder: (context, index) {
+//                     final movie = searchResults[index]['show'];
+//                     return GestureDetector(
+//                       onTap: () {
+//                         Navigator.push(
+//                           context,
+//                           MaterialPageRoute(
+//                             builder: (context) => DetailsScreen(movie: movie),
+//                           ),
+//                         );
+//                       },
+//                       child: Image.network(
+//                         movie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+//                         fit: BoxFit.cover,
+//                         errorBuilder: (context, error, stackTrace) {
+//                           return Container(
+//                             color: Colors.grey,
+//                             child: Center(child: Text(movie['name'])),
+//                           );
+//                         },
+//                       ),
+//                     );
+//                   },
+//                 ),
+//     );
+//   }
+// }
+
+// class DetailsScreen extends StatelessWidget {
+//   final dynamic movie;
+
+//   const DetailsScreen({super.key, required this.movie});
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       body: CustomScrollView(
+//         slivers: [
+//           SliverAppBar(
+//             expandedHeight: 300.0,
+//             floating: false,
+//             pinned: true,
+//             flexibleSpace: FlexibleSpaceBar(
+//               title: Text(movie['name']),
+//               background: Stack(
+//                 fit: StackFit.expand,
+//                 children: [
+//                   Image.network(
+//                     movie['image']?['original'] ?? 'https://via.placeholder.com/500x750',
+//                     fit: BoxFit.cover,
+//                     errorBuilder: (context, error, stackTrace) {
+//                       return Container(
+//                         color: Colors.grey,
+//                         child: Center(child: Text(movie['name'])),
+//                       );
+//                     },
+//                   ),
+//                   const DecoratedBox(
+//                     decoration: BoxDecoration(
+//                       gradient: LinearGradient(
+//                         begin: Alignment.topCenter,
+//                         end: Alignment.bottomCenter,
+//                         colors: [Colors.transparent, Colors.black],
+//                       ),
+//                     ),
+//                   ),
+//                 ],
+//               ),
+//             ),
+//           ),
+//           SliverList(
+//             delegate: SliverChildListDelegate([
+//               Padding(
+//                 padding: const EdgeInsets.all(16.0),
+//                 child: Column(
+//                   crossAxisAlignment: CrossAxisAlignment.start,
+//                   children: [
+//                     ElevatedButton.icon(
+//                       onPressed: () {
+//                         // Implement play functionality
+//                       },
+//                       icon: const Icon(Icons.play_arrow),
+//                       label: const Text('Play'),
+//                       style: ElevatedButton.styleFrom(
+//                         backgroundColor: Colors.white,
+//                         foregroundColor: Colors.black,
+//                         minimumSize: const Size(double.infinity, 50),
+//                       ),
+//                     ),
+//                     const SizedBox(height: 16),
+//                     Text(
+//                       movie['name'],
+//                       style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+//                     ),
+//                     const SizedBox(height: 8),
+//                     Row(
+//                       children: [
+//                         Text('${movie['rating']?['average'] ?? 'N/A'} Rating'),
+//                         const SizedBox(width: 16),
+//                         Text(movie['premiered']?.split('-')[0] ?? 'N/A'),
+//                         const SizedBox(width: 16),
+//                         Container(
+//                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+//                           decoration: BoxDecoration(
+//                             border: Border.all(color: Colors.white),
+//                             borderRadius: BorderRadius.circular(3),
+//                           ),
+//                           child: Text(movie['type'] ?? 'N/A'),
+//                         ),
+//                       ],
+//                     ),
+//                     const SizedBox(height: 16),
+//                     Text(
+//                       _parseHtmlString(movie['summary'] ?? 'No summary available.'),
+//                       style: const TextStyle(fontSize: 16),
+//                     ),
+//                     const SizedBox(height: 16),
+//                     Text('Starring: ${movie['_embedded']?['cast']?.map((c) => c['person']['name']).take(3).join(', ') ?? 'N/A'}'),
+//                     const SizedBox(height: 8),
+//                     Text('Genres: ${(movie['genres'] as List?)?.join(', ') ?? 'N/A'}'),
+//                     const SizedBox(height: 24),
+//                     const Text(
+//                       'More Like This',
+//                       style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+//                     ),
+//                     const SizedBox(height: 16),
+//                     SizedBox(
+//                       height: 200,
+//                       child: Consumer<MovieProvider>(
+//                         builder: (context, movieProvider, child) {
+//                           final List<dynamic> movieGenres = movie['genres'] ?? [];
+//                           final similarMovies = movieProvider.movies
+//                               .where((m) {
+//                                 final List<dynamic> genres = m['genres'] ?? [];
+//                                 return genres.any((g) => movieGenres.contains(g));
+//                               })
+//                               .take(10)
+//                               .toList();
+//                           return ListView.builder(
+//                             scrollDirection: Axis.horizontal,
+//                             itemCount: similarMovies.length,
+//                             itemBuilder: (context, index) {
+//                               final similarMovie = similarMovies[index];
+//                               return GestureDetector(
+//                                 onTap: () {
+//                                   Navigator.push(
+//                                     context,
+//                                     MaterialPageRoute(
+//                                       builder: (context) => DetailsScreen(movie: similarMovie),
+//                                     ),
+//                                   );
+//                                 },
+//                                 child: Padding(
+//                                   padding: const EdgeInsets.only(right: 8.0),
+//                                   child: Image.network(
+//                                     similarMovie['image']?['medium'] ?? 'https://via.placeholder.com/210x295',
+//                                     width: 130,
+//                                     fit: BoxFit.cover,
+//                                     errorBuilder: (context, error, stackTrace) {
+//                                       return Container(
+//                                       width: 130,
+//                                         color: Colors.grey,
+//                                         child: Center(child: Text(similarMovie['name'])),
+//                                       );
+//                                     },
+//                                   ),
+//                                 ),
+//                               );
+//                             },
+//                           );
+//                         },
+//                       ),
+//                     ),
+//                   ],
+//                 ),
+//               ),
+//             ]),
+//           ),
+//         ],
+//       ),
+//     );
+//   }
+
+//   String _parseHtmlString(String htmlString) {
+//     return htmlString.replaceAll(RegExp(r'<[^>]*>'), '');
+//   }
+// }
+
+// class PreviewCard extends StatelessWidget {
+//   final dynamic movie;
+
+//   const PreviewCard({super.key, required this.movie});
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return GestureDetector(
+//       onTap: () {
+//         Navigator.push(
+//           context,
+//           MaterialPageRoute(
+//             builder: (context) => DetailsScreen(movie: movie),
+//           ),
+//         );
+//       },
+//       child: Stack(
+//         alignment: Alignment.center,
+//         children: [
+//           CircleAvatar(
+//             radius: 50,
+//             backgroundImage: NetworkImage(
+//               movie['image']?['medium'] ?? 'https://via.placeholder.com/100x100',
+//             ),
+//             onBackgroundImageError: (exception, stackTrace) {
+//               print('Error loading image: $exception');
+//             },
+//           ),
+//           Container(
+//             decoration: BoxDecoration(
+//               shape: BoxShape.circle,
+//               border: Border.all(color: Colors.red, width: 2),
+//             ),
+//             child: const CircleAvatar(
+//               radius: 52,
+//               backgroundColor: Colors.transparent,
+//             ),
+//           ),
+//         ],
+//       ),
+//     );
+//   }
+// }
+
+// class PreviewList extends StatelessWidget {
+//   const PreviewList({super.key});
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return Column(
+//       crossAxisAlignment: CrossAxisAlignment.start,
+//       children: [
+//         const Padding(
+//           padding: EdgeInsets.all(8.0),
+//           child: Text(
+//             'Previews',
+//             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+//           ),
+//         ),
+//         SizedBox(
+//           height: 110,
+//           child: Consumer<MovieProvider>(
+//             builder: (context, movieProvider, child) {
+//               return ListView.builder(
+//                 scrollDirection: Axis.horizontal,
+//                 itemCount: movieProvider.previews.length,
+//                 itemBuilder: (context, index) {
+//                   final movie = movieProvider.previews[index];
+//                   return Padding(
+//                     padding: const EdgeInsets.symmetric(horizontal: 4.0),
+//                     child: PreviewCard(movie: movie),
+//                   );
+//                 },
+//               );
+//             },
+//           ),
+//         ),
+//       ],
+//     );
+//   }
+// }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
